@@ -1,0 +1,10 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+*.log
+__pycache__/
+*.pyc
+archives/
+.claude/
+claude_via_proxychains
