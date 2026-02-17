@@ -403,6 +403,45 @@ class Database:
         row = await cur.fetchone()
         return row["oi_usd"] if row else None
 
+    async def get_oi_history(
+        self, symbol_id: int, since: int
+    ) -> list[tuple[int, float]]:
+        """Return [(timestamp, oi_usd)] sorted ASC for OI flush detection."""
+        cur = await self._db.execute(
+            """SELECT timestamp, oi_usd FROM open_interest
+               WHERE symbol_id=? AND timestamp>=? AND oi_usd IS NOT NULL
+               ORDER BY timestamp ASC""",
+            (symbol_id, since),
+        )
+        return [(r["timestamp"], r["oi_usd"]) for r in await cur.fetchall()]
+
+    async def get_latest_ls_ratio(
+        self, symbol_id: int
+    ) -> tuple[float, float] | None:
+        """Return (ratio, long_pct) or None."""
+        cur = await self._db.execute(
+            """SELECT ratio, long_pct FROM long_short_ratio
+               WHERE symbol_id=?
+               ORDER BY timestamp DESC LIMIT 1""",
+            (symbol_id,),
+        )
+        row = await cur.fetchone()
+        if row and row["ratio"] is not None:
+            return (row["ratio"], row["long_pct"] or 0.0)
+        return None
+
+    async def get_latest_taker_ratio(
+        self, symbol_id: int
+    ) -> float | None:
+        cur = await self._db.execute(
+            """SELECT buy_sell_ratio FROM taker_ratio
+               WHERE symbol_id=?
+               ORDER BY timestamp DESC LIMIT 1""",
+            (symbol_id,),
+        )
+        row = await cur.fetchone()
+        return row["buy_sell_ratio"] if row else None
+
     async def get_latest_funding(
         self, symbol_id: int
     ) -> float | None:

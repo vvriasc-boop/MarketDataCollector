@@ -179,17 +179,24 @@ async def _five_min_loop(
         await db.insert_anomalies(anomaly_rows)
         for anom in anomaly_rows:
             sev = anom[4]
-            if config.SEVERITY_ORDER.get(sev, 0) >= config.SEVERITY_ORDER.get(
-                config.MIN_ALERT_SEVERITY, 0
-            ):
+            atype = anom[3]
+            # oi_flush always notified (severity >= medium)
+            should_notify = (
+                atype == "oi_flush"
+                or config.SEVERITY_ORDER.get(sev, 0)
+                >= config.SEVERITY_ORDER.get(config.MIN_ALERT_SEVERITY, 0)
+            )
+            if should_notify:
                 sid = anom[2]
                 sym_name = next(
                     (s["symbol"] for s in all_symbols if s["id"] == sid), "?"
                 )
+                text = (
+                    anom[6] if atype == "oi_flush"
+                    else _format_alert(sym_name, anom)
+                )
                 await notifier.send(
-                    _format_alert(sym_name, anom),
-                    priority=sev,
-                    msg_type=anom[3],
+                    text, priority=sev, msg_type=atype,
                 )
 
     # collector stats

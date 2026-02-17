@@ -27,6 +27,14 @@ OI_SURGE_THRESHOLD: float = float(os.getenv("OI_SURGE_THRESHOLD", "0.10"))
 LS_EXTREME_THRESHOLD: float = float(os.getenv("LS_EXTREME_THRESHOLD", "3.0"))
 TAKER_EXTREME_THRESHOLD: float = float(os.getenv("TAKER_EXTREME_THRESHOLD", "2.0"))
 
+# OI Flush detection
+OI_BUILDUP_THRESHOLD: float = float(os.getenv("OI_BUILDUP_THRESHOLD", "3.0"))
+OI_BUILDUP_MIN_POINTS: int = int(os.getenv("OI_BUILDUP_MIN_POINTS", "12"))
+OI_FLUSH_DROP_PCT: float = float(os.getenv("OI_FLUSH_DROP_PCT", "2.0"))
+OI_FLUSH_CURRENT_MAX: float = 2.0
+OI_FLUSH_LOOKBACK: int = 24
+OI_FLUSH_COOLDOWN: int = int(os.getenv("OI_FLUSH_COOLDOWN", "1800"))
+
 # Notifications
 ALERT_COOLDOWN: int = int(os.getenv("ALERT_COOLDOWN", "3600"))
 MIN_ALERT_SEVERITY: str = os.getenv("MIN_ALERT_SEVERITY", "high")
