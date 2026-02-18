@@ -20,6 +20,9 @@ services/
 handlers/
   commands.py        — /start, /status, /stats, /anomalies, /top, /pair, /hot
   keyboards.py       — клавиатуры
+backtest_oi_flush.py — бэктест OI Flush SHORT + shared utilities (Tee, simulate_trade, build_price_path)
+backtest_ls_taker.py — бэктест L/S + Taker SHORT (импортирует из backtest_oi_flush.py)
+optimizer.py         — оптимизатор TP/SL: 15×16 комбинаций × 4 фильтра
 ```
 
 ## Запуск
@@ -63,6 +66,14 @@ journalctl -u market-data-collector -f
 - **Решение:** передавать через module-level переменную: `commands.db = db`
 - **При повторении:** для shared state использовать module vars или middleware, не bot[]
 
+### Python 3.10
+**[2026-02-18]** Nested f-strings с одинаковыми кавычками — SyntaxError
+
+- **Симптом:** `SyntaxError` на `f'{c['key']:.1f}'` внутри другого f-string
+- **Причина:** Python 3.10 не поддерживает вложенные f-strings с одинаковыми кавычками (поддержка с 3.12+)
+- **Решение:** Извлечь в локальную переменную: `val = f"{c['key']:.1f}"`, затем `{val}` в основном f-string
+- **При повторении:** Не вкладывать f-strings с одинаковым типом кавычек
+
 ### Build
 **[2026-02-17]** aiogram 3.15 конфликтует с aiohttp >= 3.11
 
@@ -100,6 +111,18 @@ journalctl -u market-data-collector -f
 | OI_FLUSH_DROP_PCT | Мин. % падения от пика | 2.0 |
 | OI_FLUSH_COOLDOWN | Cooldown OI Flush (сек) | 1800 |
 | ARCHIVE_AFTER_DAYS | Архивация данных старше N дней | 30 |
+
+## Бэктест
+
+- **Результаты** всегда сохраняются в `.txt` (`backtest_{name}_{date}.txt`) и отправляются в Telegram через Bot API
+- **Sync sqlite3**: бэктесты используют синхронный `sqlite3` (standalone скрипты, не async бот)
+- **Shared imports**: `backtest_ls_taker.py` импортирует утилиты из `backtest_oi_flush.py` (Tee, send_to_telegram, build_price_path, simulate_trade, find_signals, load_*, fmt_*)
+- **Архитектура**: `main()` → `Tee(stdout, buf)` → `_main_impl()` в try/finally → `_save_and_send()` в finally (гарантирует сохранение даже при ранних return)
+
+```bash
+python3 backtest_oi_flush.py    # OI Flush SHORT стратегия
+python3 backtest_ls_taker.py    # L/S + Taker SHORT стратегия
+```
 
 ## Systemd
 
