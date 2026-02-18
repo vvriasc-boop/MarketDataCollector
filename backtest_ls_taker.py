@@ -2,8 +2,9 @@
 """
 L/S + Taker Backtest — SHORT strategy.
 
-Ищет момент, когда L/S > 2.0 И Taker < 1.0 одновременно,
-и симулирует SHORT вход по mark_price. Сравнивает с OI Flush стратегией.
+Ищет момент, когда L/S аномально высок для данного символа (адаптивный порог:
+mean + K*σ) И Taker < 1.0 одновременно. Симулирует SHORT вход по mark_price.
+Сравнивает с OI Flush стратегией.
 
 Запуск: python3 backtest_ls_taker.py
 """
@@ -11,6 +12,7 @@ L/S + Taker Backtest — SHORT strategy.
 import io
 import os
 import sqlite3
+import statistics
 import sys
 import time
 from collections import defaultdict
@@ -35,9 +37,11 @@ load_dotenv()
 
 DB_PATH = os.getenv("DB_PATH", "market_data.db")
 
-# Пороги сигнала
-LS_THRESHOLD = 2.0
-TAKER_THRESHOLD = 1.0
+# Пороги сигнала — L/S адаптивный (per-symbol)
+LS_ZSCORE = 2.0              # σ выше среднего для порога
+LS_MIN_ABS = 1.5             # абсолютный минимум (не ниже этого)
+LS_MIN_DATAPOINTS = 24       # мин точек для расчёта stats (2ч)
+TAKER_THRESHOLD = 1.0        # фиксированный
 
 # Дедупликация
 SIGNAL_COOLDOWN = 6         # точек между сигналами одной пары (30 мин)
@@ -55,8 +59,36 @@ POINT_INTERVAL = 300        # 5 мин
 # ПОИСК СИГНАЛОВ L/S + TAKER
 # ═══════════════════════════════════════════════════════
 
-def find_ls_taker_signals(conn, symbol_id):
-    """Timestamps where L/S > threshold AND Taker < threshold simultaneously."""
+def compute_ls_thresholds(conn):
+    """Адаптивные пороги L/S per symbol: mean + LS_ZSCORE * σ."""
+    cur = conn.execute(
+        "SELECT symbol_id, ratio FROM long_short_ratio ORDER BY symbol_id"
+    )
+    rows = cur.fetchall()
+
+    by_symbol = defaultdict(list)
+    for sym_id, ratio in rows:
+        by_symbol[sym_id].append(ratio)
+
+    thresholds = {}
+    for sym_id, ratios in by_symbol.items():
+        if len(ratios) < LS_MIN_DATAPOINTS:
+            continue
+        mean = statistics.mean(ratios)
+        stdev = statistics.stdev(ratios) if len(ratios) > 1 else 0.0
+        adaptive = mean + LS_ZSCORE * stdev
+        thresholds[sym_id] = {
+            'mean': mean,
+            'stdev': stdev,
+            'adaptive': adaptive,
+            'threshold': max(adaptive, LS_MIN_ABS),
+            'count': len(ratios),
+        }
+    return thresholds
+
+
+def find_ls_taker_signals(conn, symbol_id, ls_threshold):
+    """Timestamps where L/S > adaptive threshold AND Taker < threshold."""
     cur = conn.execute(
         """SELECT ls.timestamp, ls.ratio, t.buy_sell_ratio
            FROM long_short_ratio ls
@@ -66,7 +98,7 @@ def find_ls_taker_signals(conn, symbol_id):
              AND ls.ratio > ?
              AND t.buy_sell_ratio < ?
            ORDER BY ls.timestamp ASC""",
-        (symbol_id, LS_THRESHOLD, TAKER_THRESHOLD),
+        (symbol_id, ls_threshold, TAKER_THRESHOLD),
     )
     return cur.fetchall()
 
@@ -163,9 +195,9 @@ def _print_comparison(closed_trades, oi_flush_signals, hours):
                            oi_stats['win_rate'], oi_stats['total_pnl'],
                            oi_stats['avg_pnl']))
 
-    # 3. OI Flush + L/S > 2.0 + Taker < 1.0
+    # 3. OI Flush + L/S > 2.0 + Taker < 1.0 (фикс. порог для сравнения)
     oi_lt = [s for s in oi_flush_signals
-             if s.get('ls_ratio') is not None and s['ls_ratio'] > LS_THRESHOLD
+             if s.get('ls_ratio') is not None and s['ls_ratio'] > LS_MIN_ABS
              and s.get('taker_ratio') is not None and s['taker_ratio'] < TAKER_THRESHOLD]
     oi_lt_stats = _calc_strategy_stats(oi_lt)
     if oi_lt_stats:
@@ -288,6 +320,10 @@ def _main_impl(start_time):
 
     db_min_ts, db_max_ts = row[0], row[1]
 
+    # ─── АДАПТИВНЫЕ ПОРОГИ L/S ────────────────────────
+
+    ls_thresholds = compute_ls_thresholds(conn)
+
     # ─── СБОР СИГНАЛОВ (L/S+Taker + OI Flush за один проход) ──
 
     all_signals = []          # L/S + Taker сигналы
@@ -303,7 +339,12 @@ def _main_impl(start_time):
         oi_ts_to_idx = {ts: idx for idx, (ts, _, _) in enumerate(oi_points)}
 
         # --- L/S + Taker сигналы ---
-        hits = find_ls_taker_signals(conn, sym_id)
+        ls_info = ls_thresholds.get(sym_id)
+        if ls_info is None:
+            # Нет данных L/S — пропускаем L/S+Taker, но OI Flush ниже всё равно ищем
+            hits = []
+        else:
+            hits = find_ls_taker_signals(conn, sym_id, ls_info['threshold'])
         last_signal_ts = -SIGNAL_COOLDOWN * POINT_INTERVAL
         sym_had_signals = False
 
@@ -336,6 +377,7 @@ def _main_impl(start_time):
                 'signal_time': ts,
                 'entry_price': entry_price,
                 'ls_ratio': ls_ratio,
+                'ls_threshold': ls_info['threshold'],
                 'taker_ratio': taker_ratio,
                 'funding_rate': funding,
                 'oi_usd': oi_usd,
@@ -382,9 +424,24 @@ def _main_impl(start_time):
     print()
     print("═══ L/S + TAKER BACKTEST (SHORT) ═══")
     print(f"Период: {ts_to_str(db_min_ts)} — {ts_to_str(db_max_ts)} ({hours:.0f}ч)")
-    print(f"Пар с сигналами: {pairs_with_lt_signals}")
-    print(f"Параметры: L/S > {LS_THRESHOLD}, Taker < {TAKER_THRESHOLD}, "
-          f"TP={TAKE_PROFIT}%, SL={STOP_LOSS}%, {hold_str}")
+    print(f"Пар с данными L/S: {len(ls_thresholds)} | Пар с сигналами: {pairs_with_lt_signals}")
+    print(f"Параметры: L/S > mean+{LS_ZSCORE}σ (мин {LS_MIN_ABS}), "
+          f"Taker < {TAKER_THRESHOLD}, TP={TAKE_PROFIT}%, SL={STOP_LOSS}%, {hold_str}")
+
+    # Диагностика адаптивных порогов
+    sym_id_to_name = {v: k for k, v in {sym_id: sym_name
+                      for sym_id, sym_name in symbols.items()}.items()}
+    diag = []
+    for sym_id, info in ls_thresholds.items():
+        name = symbols.get(sym_id, f"ID:{sym_id}")
+        diag.append((name, info))
+    diag.sort(key=lambda x: x[1]['threshold'], reverse=True)
+
+    print(f"\nАдаптивные пороги L/S (топ-10 по порогу):")
+    for name, info in diag[:10]:
+        tag = "adaptive" if info['adaptive'] >= LS_MIN_ABS else "min abs"
+        print(f"  {name:15s} mean={info['mean']:.2f} σ={info['stdev']:.2f} "
+              f"порог={info['threshold']:.2f} ({tag})")
 
     if not all_signals:
         print("\nСигналов не найдено.")
@@ -404,8 +461,8 @@ def _main_impl(start_time):
 
         print(f"#{i:<3} {sig['symbol']} | {ts_to_str(sig['signal_time'])} | "
               f"SHORT @ {fmt_price(sig['entry_price'])}")
-        print(f"     L/S: {sig['ls_ratio']:.2f} | Taker: {sig['taker_ratio']:.2f} | "
-              f"Funding: {fr_s}")
+        print(f"     L/S: {sig['ls_ratio']:.2f} (порог {sig['ls_threshold']:.2f}) "
+              f"| Taker: {sig['taker_ratio']:.2f} | Funding: {fr_s}")
 
         if trade:
             hold_min = trade['hold_points'] * (POINT_INTERVAL // 60)
